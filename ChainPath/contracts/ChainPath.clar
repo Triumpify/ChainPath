@@ -1,4 +1,4 @@
-;; ChainPath Marketplace Verification Network - Fixed Version
+;; ChainPath Marketplace Verification System
 
 ;; Main item registry with embedded counters
 (define-map items
@@ -131,6 +131,24 @@
       (is-eq status "recalled"))
 )
 
+(define-private (validate-event-id (item-id uint) (event-id uint))
+  (let ((item (map-get? items { id: item-id })))
+    (match item
+      some-item (or (< event-id (get checkpoint-count some-item))
+                    (< event-id (get transfer-count some-item)))
+      false))
+)
+
+(define-private (validate-principal (principal-input principal))
+  (not (is-eq principal-input 'SP000000000000000000002Q6VF78))
+)
+
+(define-private (validate-optional-url (url (optional (string-utf8 256))))
+  (match url
+    some-url (and (> (len some-url) u0) (<= (len some-url) u256))
+    true)
+)
+
 ;; Utility for hashing - now validates input
 (define-private (hash-string (input (string-utf8 512)))
   (begin
@@ -234,14 +252,15 @@
 (define-public (accept-transfer (item-id uint) (event-id uint))
   (let
     ((validated-item-id (begin (asserts! (validate-item-id item-id) (err ERR-INVALID-INPUT)) item-id))
+     (validated-event-id (begin (asserts! (validate-event-id item-id event-id) (err ERR-INVALID-INPUT)) event-id))
      (item (unwrap! (map-get? items { id: validated-item-id }) (err ERR-ITEM-NOT-FOUND)))
-     (event (unwrap! (map-get? events { item-id: validated-item-id, event-id: event-id }) (err ERR-EVENT-NOT-FOUND))))
+     (event (unwrap! (map-get? events { item-id: validated-item-id, event-id: validated-event-id }) (err ERR-EVENT-NOT-FOUND))))
     
     (asserts! (is-eq (some tx-sender) (get to-keeper event)) (err ERR-NOT-RECIPIENT))
     (asserts! (is-eq (get status event) "pending") (err ERR-NOT-PENDING))
     
     ;; Update event
-    (map-set events { item-id: validated-item-id, event-id: event-id }
+    (map-set events { item-id: validated-item-id, event-id: validated-event-id }
       (merge event { status: "completed" }))
     
     ;; Update item keeper
@@ -256,12 +275,13 @@
 (define-public (reject-transfer (item-id uint) (event-id uint))
   (let
     ((validated-item-id (begin (asserts! (validate-item-id item-id) (err ERR-INVALID-INPUT)) item-id))
-     (event (unwrap! (map-get? events { item-id: validated-item-id, event-id: event-id }) (err ERR-EVENT-NOT-FOUND))))
+     (validated-event-id (begin (asserts! (validate-event-id item-id event-id) (err ERR-INVALID-INPUT)) event-id))
+     (event (unwrap! (map-get? events { item-id: validated-item-id, event-id: validated-event-id }) (err ERR-EVENT-NOT-FOUND))))
     
     (asserts! (is-eq (some tx-sender) (get to-keeper event)) (err ERR-NOT-RECIPIENT))
     (asserts! (is-eq (get status event) "pending") (err ERR-NOT-PENDING))
     
-    (map-set events { item-id: validated-item-id, event-id: event-id }
+    (map-set events { item-id: validated-item-id, event-id: validated-event-id }
       (merge event { status: "rejected" }))
     
     (ok true)
@@ -270,9 +290,10 @@
 
 ;; Authorize inspector with validation
 (define-public (authorize-inspector (inspector principal) (name (string-utf8 128)) (role (string-ascii 64)))
-  (let ((validated-name (begin (asserts! (validate-string-utf8-128 name) (err ERR-INVALID-INPUT)) name))
+  (let ((validated-inspector (begin (asserts! (validate-principal inspector) (err ERR-INVALID-INPUT)) inspector))
+        (validated-name (begin (asserts! (validate-string-utf8-128 name) (err ERR-INVALID-INPUT)) name))
         (validated-role (begin (asserts! (validate-string-ascii-64 role) (err ERR-INVALID-INPUT)) role)))
-    (map-set inspectors { org: tx-sender, inspector: inspector }
+    (map-set inspectors { org: tx-sender, inspector: validated-inspector }
       { name: validated-name, role: validated-role, active: true })
     (ok true)
   )
@@ -280,8 +301,9 @@
 
 ;; Revoke inspector with validation
 (define-public (revoke-inspector (inspector principal))
-  (let ((record (unwrap! (map-get? inspectors { org: tx-sender, inspector: inspector }) (err ERR-EVENT-NOT-FOUND))))
-    (map-set inspectors { org: tx-sender, inspector: inspector }
+  (let ((validated-inspector (begin (asserts! (validate-principal inspector) (err ERR-INVALID-INPUT)) inspector))
+        (record (unwrap! (map-get? inspectors { org: tx-sender, inspector: validated-inspector }) (err ERR-EVENT-NOT-FOUND))))
+    (map-set inspectors { org: tx-sender, inspector: validated-inspector }
       (merge record { active: false }))
     (ok true)
   )
@@ -297,6 +319,7 @@
   (let ((validated-item-id (begin (asserts! (validate-item-id item-id) (err ERR-INVALID-INPUT)) item-id))
         (validated-standard (begin (asserts! (validate-string-ascii-64 standard) (err ERR-INVALID-INPUT)) standard))
         (validated-hash (begin (asserts! (is-eq (len hash) u32) (err ERR-INVALID-INPUT)) hash))
+        (validated-url (begin (asserts! (validate-optional-url url) (err ERR-INVALID-INPUT)) url))
         (item (unwrap! (map-get? items { id: validated-item-id }) (err ERR-ITEM-NOT-FOUND))))
     
     (asserts! (authorized? (get creator item) tx-sender) (err ERR-NOT-AUTHORIZED))
@@ -305,7 +328,7 @@
     (map-set certs { item-id: validated-item-id, standard: validated-standard }
       {
         authority: tx-sender, issued: stacks-block-height, expires: expires,
-        hash: validated-hash, url: url, valid: true
+        hash: validated-hash, url: validated-url, valid: true
       })
     
     (ok true)
